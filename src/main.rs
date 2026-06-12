@@ -7,12 +7,100 @@ fn main() {
 }
 
 struct Model {
-    mover: Mover,
+    movers: Vec<Mover>,
     map: Map,
 }
 
+struct Mover {
+    position: Vec2,
+    velocity: Vec2,
+    color: Rgb,
+}
+
+const PERLIN_SCALE: f64 = 0.005;
+const TIME_STEP: f64 = 0.001;
+/// How far out (pixels) to sample for the finite-difference gradient.
+/// Larger = reads broader landscape features.
+const GRADIENT_H: f64 = 40.0;
+/// How strongly the slope accelerates the balloon (px/s² per gradient unit).
+const FORCE_SCALE: f32 = 20000.0;
+/// Velocity damping (drag). Higher = slower, less oscillation.
+const DAMPING: f32 = 1.2;
+
+/// Convert a nannou screen position to texture pixel coordinates.
+/// Nannou: origin at center, y up. Texture: origin at top-left, y down.
+fn nannou_to_pixel(pos: Vec2, win: &Rect) -> Vec2 {
+    Vec2::new(pos.x - win.left(), win.top() - pos.y)
+}
+
+/// Gradient of the perlin field at `pos` (nannou coords), returned in nannou force-space.
+/// Samples in texture pixel coordinates so it matches what's displayed.
+fn perlin_gradient(perlin: &noise::Perlin, pos: Vec2, time: f64, win: &Rect) -> Vec2 {
+    let s = PERLIN_SCALE;
+    let h = GRADIENT_H;
+    let p = nannou_to_pixel(pos, win);
+    let px = p.x as f64;
+    let py = p.y as f64;
+
+    // Gradient in pixel space (x right, y down)
+    let gx = (perlin.get([(px + h) * s, py * s, time]) - perlin.get([(px - h) * s, py * s, time]))
+        / (2.0 * h);
+    let gy_down = (perlin.get([px * s, (py + h) * s, time])
+        - perlin.get([px * s, (py - h) * s, time]))
+        / (2.0 * h);
+
+    // pixel y-down maps to nannou y-up, so flip gy when returning as a nannou-space force
+    Vec2::new(gx as f32, -gy_down as f32)
+}
+
+/// Derivatives of the state (pos, vel) — the RHS of the ODE system.
+/// dpos/dt = vel
+/// dvel/dt = -grad * FORCE_SCALE  -  vel * DAMPING
+fn derivatives(
+    perlin: &noise::Perlin,
+    pos: Vec2,
+    vel: Vec2,
+    time: f64,
+    win: &Rect,
+) -> (Vec2, Vec2) {
+    let grad = perlin_gradient(perlin, pos, time, win);
+    let accel = -grad * FORCE_SCALE - vel * DAMPING;
+    (vel, accel)
+}
+
+/// Advance (pos, vel) one step using RK4, field frozen at `time`.
+fn rk4_step(
+    perlin: &noise::Perlin,
+    pos: Vec2,
+    vel: Vec2,
+    time: f64,
+    dt: f32,
+    win: &Rect,
+) -> (Vec2, Vec2) {
+    let (dp1, dv1) = derivatives(perlin, pos, vel, time, win);
+    let (dp2, dv2) = derivatives(
+        perlin,
+        pos + dp1 * (dt / 2.0),
+        vel + dv1 * (dt / 2.0),
+        time,
+        win,
+    );
+    let (dp3, dv3) = derivatives(
+        perlin,
+        pos + dp2 * (dt / 2.0),
+        vel + dv2 * (dt / 2.0),
+        time,
+        win,
+    );
+    let (dp4, dv4) = derivatives(perlin, pos + dp3 * dt, vel + dv3 * dt, time, win);
+
+    let new_pos = pos + (dp1 + dp2 * 2.0 + dp3 * 2.0 + dp4) * (dt / 6.0);
+    let new_vel = vel + (dv1 + dv2 * 2.0 + dv3 * 2.0 + dv4) * (dt / 6.0);
+    (new_pos, new_vel)
+}
+
 fn model(app: &App) -> Model {
-    let window = app.main_window();
+    let window: std::cell::Ref<'_, Window> = app.main_window();
     let window_rect = window.rect();
     let width = window_rect.w() as u32;
     let height = window_rect.h() as u32;
@@ -27,8 +115,26 @@ fn model(app: &App) -> Model {
         .usage(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST)
         .build(window.device());
 
+    let positions: Vec<Vec2> = distribute_points_1d(10, window_rect.bottom(), window_rect.top())
+        .flat_map(|x| {
+            distribute_points_1d(10, window_rect.left(), window_rect.right())
+                .map(move |y| Vec2::new(x, y))
+        })
+        .collect();
+
+    let total = positions.len() as f32;
+    let movers = positions
+        .into_iter()
+        .enumerate()
+        .map(|(i, position)| {
+            let hue = (i as f32 / total) * 360.0;
+            let color: Rgb = nannou::color::hsl(hue / 360.0, 1.0, 0.6).into();
+            Mover { position, velocity: Vec2::ZERO, color }
+        })
+        .collect();
+
     Model {
-        mover: Mover::default(),
+        movers,
         map: Map {
             perlin,
             texture,
@@ -37,9 +143,22 @@ fn model(app: &App) -> Model {
     }
 }
 
-// Fixed: Added the required third parameter `Update`
-fn update(app: &App, model: &mut Model, _update: Update) {
-    model.mover.position += model.mover.velocity * model.mover.acceleration;
+fn update(app: &App, model: &mut Model, update: Update) {
+    let dt = update.since_last.as_secs_f32();
+    let win = app.window_rect();
+
+    model.movers.iter_mut().for_each(|m| {
+        let (new_pos, new_vel) = rk4_step(
+            &model.map.perlin,
+            m.position,
+            m.velocity,
+            model.map.time,
+            dt,
+            &win,
+        );
+        m.position = new_pos;
+        m.velocity = new_vel;
+    });
 
     model.map.step(app);
 }
@@ -49,43 +168,13 @@ fn view(app: &App, model: &Model, frame: Frame) {
     let win: Rect = app.window_rect();
     let draw = app.draw();
 
-    draw.ellipse()
-        .xy(model.mover.position)
-        .radius(1.0)
-        .color(model.mover.color);
-
     model.map.show(&draw, &win);
 
-    // let mut rng = ThreadRng::default();
-    // let normal = Normal::new(0.0, 100.0).unwrap();
-
-    // let num_points = 250;
-    // let xs = normal.sample_iter(rng.clone()).take(num_points);
-    // let ys = normal.sample_iter(&mut rng).take(num_points);
-    // let points = xs.zip(ys).map(|(x, y)| pt2(x, y));
-
-    // for pt in points {
-    //     draw.ellipse()
-    //         .xy(pt)
-    //         .radius(10.0)
-    //         .color(rgba(1.0, 1.0, 1.0, 0.01));
-    // }
-
-    // let points = distribute_points_1d(num_points, win.left(), win.right());
-    // let points = points.map(|x| {
-    //     let point = pt2(x, (x / 20.0).sin() * 50.0);
-    //     (point, STEELBLUE)
-    // });
-    // draw.polyline().weight(3.0).points_colored(points);
+    model.movers.iter().for_each(|m| {
+        draw.ellipse().xy(m.position).radius(5.0).color(m.color);
+    });
 
     draw.to_frame(app, &frame).unwrap();
-}
-
-fn distribute_points_1d(num_points: i32, start: f32, end: f32) -> impl Iterator<Item = f32> {
-    let denominator = if num_points > 1 { num_points - 1 } else { 1 };
-    let step = (end - start) / denominator as f32;
-
-    (0..num_points).map(move |i| start + (i as f32 * step))
 }
 
 struct Map {
@@ -101,16 +190,14 @@ impl Map {
         let width = texture_size[0] as usize;
         let height = texture_size[1] as usize;
 
-        let scale = 0.008;
-
         // Generate raw pixel data (a checkerboard pattern)
         let mut pixels = vec![0u8; width * height * 4];
         for y in 0..height {
             for x in 0..width {
                 let i = (y * width + x) * 4;
 
-                let nx = x as f64 * scale;
-                let ny = y as f64 * scale;
+                let nx = x as f64 * PERLIN_SCALE;
+                let ny = y as f64 * PERLIN_SCALE;
 
                 let red_noise: f64 = self.perlin.get([nx, ny, self.time]);
                 // let green_noise: f64 = self.perlin.get([nx, ny, self.time + 10000.0]);
@@ -139,7 +226,7 @@ impl Map {
             .upload_data(window.device(), &mut encoder, slice);
         window.queue().submit(Some(encoder.finish()));
 
-        self.time += 0.01;
+        self.time += TIME_STEP;
     }
 
     fn show(&self, draw: &Draw, win: &Rect) {
@@ -147,11 +234,9 @@ impl Map {
     }
 }
 
-#[derive(Default)]
-struct Mover {
-    position: Vec2,
-    velocity: Vec2,
-    acceleration: Vec2,
-    color: Rgb,
-    rng: ThreadRng,
+fn distribute_points_1d(num_points: i32, start: f32, end: f32) -> impl Iterator<Item = f32> {
+    let denominator = if num_points > 1 { num_points - 1 } else { 1 };
+    let step = (end - start) / denominator as f32;
+
+    (0..num_points).map(move |i| start + (i as f32 * step))
 }
