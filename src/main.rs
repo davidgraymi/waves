@@ -3,20 +3,14 @@ use noise::NoiseFn;
 use rand::prelude::*;
 
 fn main() {
-    nannou::app(model).update(update).simple_window(view).run();
+    nannou::app(model)
+        .event(event)
+        .update(update)
+        .simple_window(view)
+        .run();
 }
 
-struct Model {
-    movers: Vec<Mover>,
-    map: Map,
-}
-
-struct Mover {
-    position: Vec2,
-    velocity: Vec2,
-    color: Rgb,
-}
-
+// Slow
 const PERLIN_SCALE: f64 = 0.005;
 const TIME_STEP: f64 = 0.001;
 /// How far out (pixels) to sample for the finite-difference gradient.
@@ -26,6 +20,151 @@ const GRADIENT_H: f64 = 40.0;
 const FORCE_SCALE: f32 = 20000.0;
 /// Velocity damping (drag). Higher = slower, less oscillation.
 const DAMPING: f32 = 1.2;
+const NUM_BALLS: i32 = 36;
+const BALL_STROKE: f32 = 10.0;
+
+// Fast
+// const PERLIN_SCALE: f64 = 0.008;
+// const TIME_STEP: f64 = 0.004;
+// /// How far out (pixels) to sample for the finite-difference gradient.
+// /// Larger = reads broader landscape features.
+// const GRADIENT_H: f64 = 10.0;
+// /// How strongly the slope accelerates the balloon (px/s² per gradient unit).
+// const FORCE_SCALE: f32 = 50000.0;
+// /// Velocity damping (drag). Higher = slower, less oscillation.
+// const DAMPING: f32 = 0.8;
+// const NUM_BALLS: i32 = 36;
+// const BALL_STROKE: f32 = 10.0;
+
+fn model(app: &App) -> Model {
+    let window: std::cell::Ref<'_, Window> = app.main_window();
+    let window_rect = window.rect();
+    let width = window_rect.w() as u32;
+    let height = window_rect.h() as u32;
+
+    let mut rng: ThreadRng = ThreadRng::default();
+    let seed: u32 = rng.random();
+    let perlin = noise::Perlin::new(seed);
+
+    let texture = wgpu::TextureBuilder::new()
+        .size([width, height])
+        .format(wgpu::TextureFormat::Rgba8UnormSrgb)
+        .usage(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST)
+        .build(window.device());
+
+    Model {
+        movers: movers(app),
+        map: Map {
+            perlin,
+            texture,
+            time: 0.0,
+        },
+        reset: ScreenReset::None,
+    }
+}
+
+fn event(app: &App, model: &mut Model, event: Event) {
+    match event {
+        Event::WindowEvent { id: _, simple } => match simple {
+            Some(WindowEvent::KeyPressed(key)) => {
+                println!("Key pressed: {:?}", key);
+
+                if key == Key::Space {
+                    model.movers = movers(app);
+                    model.reset = ScreenReset::Pending;
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn update(app: &App, model: &mut Model, update: Update) {
+    let dt = update.since_last.as_secs_f32();
+    let win = app.window_rect();
+    match model.reset {
+        ScreenReset::None => {}
+        ScreenReset::Pending => {
+            model.reset = ScreenReset::Confirmed;
+        }
+        ScreenReset::Confirmed => {
+            model.reset = ScreenReset::None;
+        }
+    };
+
+    model.movers.iter_mut().for_each(|m| {
+        let (new_pos, new_vel) = rk4_step(
+            &model.map.perlin,
+            m.position,
+            m.velocity,
+            model.map.time,
+            dt,
+            &win,
+        );
+        let mut pos = new_pos;
+        let mut vel = new_vel;
+
+        if pos.x < win.left() {
+            pos.x = win.left();
+            vel.x = vel.x.abs();
+        } else if pos.x > win.right() {
+            pos.x = win.right();
+            vel.x = -vel.x.abs();
+        }
+        if pos.y < win.bottom() {
+            pos.y = win.bottom();
+            vel.y = vel.y.abs();
+        } else if pos.y > win.top() {
+            pos.y = win.top();
+            vel.y = -vel.y.abs();
+        }
+
+        m.position = pos;
+        m.velocity = vel;
+    });
+
+    model.map.step(app);
+}
+
+fn view(app: &App, model: &Model, frame: Frame) {
+    let win: Rect = app.window_rect();
+    let draw = app.draw();
+
+    match model.reset {
+        ScreenReset::None => {
+            // model.map.show(&draw, &win);
+
+            model.movers.iter().for_each(|m| {
+                draw.ellipse().xy(m.position).radius(BALL_STROKE).color(m.color);
+            });
+        }
+        ScreenReset::Confirmed => {
+            draw.background().color(BLACK);
+        }
+        ScreenReset::Pending => {}
+    }
+
+    draw.to_frame(app, &frame).unwrap();
+}
+
+struct Model {
+    movers: Vec<Mover>,
+    map: Map,
+    reset: ScreenReset,
+}
+
+struct Mover {
+    position: Vec2,
+    velocity: Vec2,
+    color: Rgb,
+}
+
+enum ScreenReset {
+    None,
+    Pending,
+    Confirmed,
+}
 
 /// Convert a nannou screen position to texture pixel coordinates.
 /// Nannou: origin at center, y up. Texture: origin at top-left, y down.
@@ -99,82 +238,34 @@ fn rk4_step(
     (new_pos, new_vel)
 }
 
-fn model(app: &App) -> Model {
+fn movers(app: &App) -> Vec<Mover> {
     let window: std::cell::Ref<'_, Window> = app.main_window();
     let window_rect = window.rect();
-    let width = window_rect.w() as u32;
-    let height = window_rect.h() as u32;
 
-    let mut rng: ThreadRng = ThreadRng::default();
-    let seed: u32 = rng.random();
-    let perlin = noise::Perlin::new(seed);
+    let ball_count = (NUM_BALLS as f32).sqrt() as i32;
 
-    let texture = wgpu::TextureBuilder::new()
-        .size([width, height])
-        .format(wgpu::TextureFormat::Rgba8UnormSrgb)
-        .usage(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST)
-        .build(window.device());
-
-    let positions: Vec<Vec2> = distribute_points_1d(10, window_rect.bottom(), window_rect.top())
-        .flat_map(|x| {
-            distribute_points_1d(10, window_rect.left(), window_rect.right())
-                .map(move |y| Vec2::new(x, y))
-        })
-        .collect();
+    let positions: Vec<Vec2> =
+        distribute_points_1d(ball_count, window_rect.bottom() * 0.75, window_rect.top() * 0.75)
+            .flat_map(|y| {
+                distribute_points_1d(ball_count, window_rect.left() * 0.75, window_rect.right() * 0.75)
+                    .map(move |x| Vec2::new(x, y))
+            })
+            .collect();
 
     let total = positions.len() as f32;
-    let movers = positions
+    positions
         .into_iter()
         .enumerate()
         .map(|(i, position)| {
             let hue = (i as f32 / total) * 360.0;
             let color: Rgb = nannou::color::hsl(hue / 360.0, 1.0, 0.6).into();
-            Mover { position, velocity: Vec2::ZERO, color }
+            Mover {
+                position,
+                velocity: Vec2::ZERO,
+                color,
+            }
         })
-        .collect();
-
-    Model {
-        movers,
-        map: Map {
-            perlin,
-            texture,
-            time: 0.0,
-        },
-    }
-}
-
-fn update(app: &App, model: &mut Model, update: Update) {
-    let dt = update.since_last.as_secs_f32();
-    let win = app.window_rect();
-
-    model.movers.iter_mut().for_each(|m| {
-        let (new_pos, new_vel) = rk4_step(
-            &model.map.perlin,
-            m.position,
-            m.velocity,
-            model.map.time,
-            dt,
-            &win,
-        );
-        m.position = new_pos;
-        m.velocity = new_vel;
-    });
-
-    model.map.step(app);
-}
-
-// Fixed: Changed `Entity` to `window::Id`
-fn view(app: &App, model: &Model, frame: Frame) {
-    let win: Rect = app.window_rect();
-    let draw = app.draw();
-
-    model.map.show(&draw, &win);
-
-    model.movers.iter().for_each(|m| {
-        draw.ellipse().xy(m.position).radius(5.0).color(m.color);
-    });
-
-    draw.to_frame(app, &frame).unwrap();
+        .collect()
 }
 
 struct Map {
