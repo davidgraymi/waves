@@ -69,7 +69,7 @@ fn event(app: &App, model: &mut Model, event: Event) {
         Event::WindowEvent { id: _, simple } => match simple {
             Some(WindowEvent::KeyPressed(key)) => match key {
                 Key::Space => {
-                    model.movers = movers(app);
+                    // model.movers = movers(app);
                     model.map.perlin = noise::Perlin::new(model.map.rng.random());
                     model.reset = ScreenReset::Pending;
                 }
@@ -94,36 +94,36 @@ fn update(app: &App, model: &mut Model, update: Update) {
         }
     };
 
-    model.movers.iter_mut().for_each(|m| {
-        let (new_pos, new_vel) = rk4_step(
-            &model.map.perlin,
-            m.position,
-            m.velocity,
-            model.map.time,
-            dt,
-            &win,
-        );
-        let mut pos = new_pos;
-        let mut vel = new_vel;
+    // model.movers.iter_mut().for_each(|m| {
+    //     let (new_pos, new_vel) = rk4_step(
+    //         &model.map.perlin,
+    //         m.position,
+    //         m.velocity,
+    //         model.map.time,
+    //         dt,
+    //         &win,
+    //     );
+    //     let mut pos = new_pos;
+    //     let mut vel = new_vel;
 
-        if pos.x < win.left() {
-            pos.x = win.left();
-            vel.x = vel.x.abs();
-        } else if pos.x > win.right() {
-            pos.x = win.right();
-            vel.x = -vel.x.abs();
-        }
-        if pos.y < win.bottom() {
-            pos.y = win.bottom();
-            vel.y = vel.y.abs();
-        } else if pos.y > win.top() {
-            pos.y = win.top();
-            vel.y = -vel.y.abs();
-        }
+    //     if pos.x < win.left() {
+    //         pos.x = win.left();
+    //         vel.x = vel.x.abs();
+    //     } else if pos.x > win.right() {
+    //         pos.x = win.right();
+    //         vel.x = -vel.x.abs();
+    //     }
+    //     if pos.y < win.bottom() {
+    //         pos.y = win.bottom();
+    //         vel.y = vel.y.abs();
+    //     } else if pos.y > win.top() {
+    //         pos.y = win.top();
+    //         vel.y = -vel.y.abs();
+    //     }
 
-        m.position = pos;
-        m.velocity = vel;
-    });
+    //     m.position = pos;
+    //     m.velocity = vel;
+    // });
 
     model.map.step(app);
 }
@@ -134,14 +134,14 @@ fn view(app: &App, model: &Model, frame: Frame) {
 
     match model.reset {
         ScreenReset::None => {
-            // model.map.show(&draw, &win);
+            model.map.show(&draw, &win);
 
-            model.movers.iter().for_each(|m| {
-                draw.ellipse()
-                    .xy(m.position)
-                    .radius(BALL_STROKE)
-                    .color(m.color);
-            });
+            // model.movers.iter().for_each(|m| {
+            //     draw.ellipse()
+            //         .xy(m.position)
+            //         .radius(BALL_STROKE)
+            //         .color(m.color);
+            // });
         }
         ScreenReset::Confirmed => {
             draw.background().color(BLACK);
@@ -286,12 +286,19 @@ struct Map {
     rng: ThreadRng,
 }
 
+const LOW_PERLIN_THRESHOLD: f64 = -0.1;
+const HIGH_PERLIN_THRESHOLD: f64 = 0.1;
+
 impl Map {
     fn step(&mut self, app: &App) {
         let window = app.main_window();
         let texture_size = self.texture.size();
         let width = texture_size[0] as usize;
         let height = texture_size[1] as usize;
+
+        let highlight = nannou::geom::Range::from_pos_and_len(0.0, 0.04);
+        let normlight = nannou::geom::Range::from_pos_and_len(0.0, 0.8);
+        let lowlight = nannou::geom::Range::from_pos_and_len(0.0, 2.0);
 
         // Generate raw pixel data (a checkerboard pattern)
         let mut pixels = vec![0u8; width * height * 4];
@@ -302,18 +309,26 @@ impl Map {
                 let nx = x as f64 * PERLIN_SCALE;
                 let ny = y as f64 * PERLIN_SCALE;
 
-                let red_noise: f64 = self.perlin.get([nx, ny, self.time]);
+                let noise: f64 = self.perlin.get([nx, ny, self.time]);
                 // let green_noise: f64 = self.perlin.get([nx, ny, self.time + 10000.0]);
                 // let blue_noise: f64 = self.perlin.get([nx, ny, self.time + 20000.0]);
                 // let alpha_noise: f64 = self.perlin.get([nx, ny, self.time + 30000.0]);
-                let r = ((red_noise + 1.0) * 127.5) as u8;
+                // let r = ((red_noise + 1.0) * 127.5) as u8;
                 // let g = ((green_noise + 1.0) * 127.5) as u8;
                 // let b = ((blue_noise + 1.0) * 127.5) as u8;
                 // let a = ((alpha_noise + 1.0) * 127.5) as u8;
 
+                let (r, g, b) = if highlight.contains(noise) {
+                    (255, 255, 255)
+                } else if normlight.contains(noise) {
+                    (0, 119, 190)
+                } else {
+                    (41, 106, 157)
+                };
+
                 pixels[i] = r; // Red
-                pixels[i + 1] = 0; // Green
-                pixels[i + 2] = 0; // Blue
+                pixels[i + 1] = g; // Green
+                pixels[i + 2] = b; // Blue
                 pixels[i + 3] = 255; // Alpha
             }
         }
