@@ -1,5 +1,5 @@
 use nannou::{color::rgb::Rgb, prelude::*};
-use noise::NoiseFn;
+use noise::{NoiseFn, Seedable};
 use rand::prelude::*;
 
 fn main() {
@@ -58,6 +58,7 @@ fn model(app: &App) -> Model {
             perlin,
             texture,
             time: 0.0,
+            rng,
         },
         reset: ScreenReset::None,
     }
@@ -66,14 +67,14 @@ fn model(app: &App) -> Model {
 fn event(app: &App, model: &mut Model, event: Event) {
     match event {
         Event::WindowEvent { id: _, simple } => match simple {
-            Some(WindowEvent::KeyPressed(key)) => {
-                println!("Key pressed: {:?}", key);
-
-                if key == Key::Space {
+            Some(WindowEvent::KeyPressed(key)) => match key {
+                Key::Space => {
                     model.movers = movers(app);
+                    model.map.perlin = noise::Perlin::new(model.map.rng.random());
                     model.reset = ScreenReset::Pending;
                 }
-            }
+                _ => {}
+            },
             _ => {}
         },
         _ => {}
@@ -136,7 +137,10 @@ fn view(app: &App, model: &Model, frame: Frame) {
             // model.map.show(&draw, &win);
 
             model.movers.iter().for_each(|m| {
-                draw.ellipse().xy(m.position).radius(BALL_STROKE).color(m.color);
+                draw.ellipse()
+                    .xy(m.position)
+                    .radius(BALL_STROKE)
+                    .color(m.color);
             });
         }
         ScreenReset::Confirmed => {
@@ -244,13 +248,20 @@ fn movers(app: &App) -> Vec<Mover> {
 
     let ball_count = (NUM_BALLS as f32).sqrt() as i32;
 
-    let positions: Vec<Vec2> =
-        distribute_points_1d(ball_count, window_rect.bottom() * 0.75, window_rect.top() * 0.75)
-            .flat_map(|y| {
-                distribute_points_1d(ball_count, window_rect.left() * 0.75, window_rect.right() * 0.75)
-                    .map(move |x| Vec2::new(x, y))
-            })
-            .collect();
+    let positions: Vec<Vec2> = distribute_points_1d(
+        ball_count,
+        window_rect.bottom() * 0.75,
+        window_rect.top() * 0.75,
+    )
+    .flat_map(|y| {
+        distribute_points_1d(
+            ball_count,
+            window_rect.left() * 0.75,
+            window_rect.right() * 0.75,
+        )
+        .map(move |x| Vec2::new(x, y))
+    })
+    .collect();
 
     let total = positions.len() as f32;
     positions
@@ -272,6 +283,7 @@ struct Map {
     perlin: noise::Perlin,
     texture: wgpu::Texture,
     time: f64,
+    rng: ThreadRng,
 }
 
 impl Map {
