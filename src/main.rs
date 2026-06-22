@@ -1,5 +1,4 @@
 use bevy::{
-    camera,
     input::mouse::{MouseMotion, MouseWheel},
     prelude::*,
 };
@@ -12,7 +11,6 @@ fn main() {
 }
 
 /// Default pixel size of cells on grid.
-/// TODO: make a min and max size for log scaling
 const DEFAULT_CELL_SIZE: f32 = 170.0;
 // const MIN_CELL_SIZE: f32 = 84.0;
 // const MAX_CELL_SIZE: f32 = MIN_CELL_SIZE * 2.0;
@@ -35,7 +33,7 @@ const GRID_SUBCELL_LINE_COLOR: LinearRgba = LinearRgba {
     alpha: 0.35,
 };
 
-const ORIGIN_ZONE_PADDING: f32 = 50.0;
+const ORIGIN_ZONE_PADDING: f32 = 40.0;
 
 struct GraphPlugin;
 
@@ -90,7 +88,7 @@ fn handle_zoom_input(
     for event in mouse_wheel_events.read() {
         let old_scale = camera_transform.scale.x;
         // Scroll up (event.y > 0) → zoom in → smaller scale (camera sees fewer world units)
-        let new_scale = (old_scale / (1.0 + event.y * CAMERA_SCALE_DAMPING));
+        let new_scale = old_scale / (1.0 + event.y * CAMERA_SCALE_DAMPING);
 
         // Keep the world point under the cursor fixed:
         // world_cursor = camera_pos + cursor_from_center * old_scale
@@ -143,7 +141,7 @@ fn draw_infinite_grid(
     // Calculate the cell size dynamically
     let cell_scale = halve_step(camera_scale);
     let cell_size = DEFAULT_CELL_SIZE * cell_scale;
-    let num_subunits: u32 = 4;
+    let num_subunits: u32 = subdivision_count(cell_size);
     let subcell_size = cell_size / num_subunits as f32;
 
     // World units visible through the viewport at the current zoom level
@@ -214,9 +212,9 @@ fn next_nice_number(min_world: f32) -> f32 {
     base * 10.0
 }
 
-fn subdivision_count(large_world: f32) -> u32 {
-    let exp = large_world.log10().floor();
-    let mantissa = (large_world / 10f32.powf(exp)).round() as u32;
+fn subdivision_count(cell_world: f32) -> u32 {
+    let exp = cell_world.log10().floor();
+    let mantissa = (cell_world / 10f32.powf(exp)).round() as u32;
     match mantissa {
         1 | 5 => 5, // odd
         2 => 4,     // even
