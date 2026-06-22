@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use bevy::{
     camera,
     input::mouse::{MouseMotion, MouseWheel},
@@ -37,8 +35,7 @@ const GRID_SUBCELL_LINE_COLOR: LinearRgba = LinearRgba {
     alpha: 0.35,
 };
 
-const CENTER_CURSOR_ZONE_MAX: Vec2 = Vec2 { x: 30.0, y: 30.0 };
-const CENTER_CURSOR_ZONE_MIN: Vec2 = Vec2 { x: -30.0, y: -30.0 };
+const ORIGIN_ZONE_PADDING: f32 = 50.0;
 
 struct GraphPlugin;
 
@@ -58,6 +55,7 @@ fn setup(mut commands: Commands) {
 }
 
 fn handle_zoom_input(
+    mut gizmos: Gizmos,
     mut mouse_wheel_events: MessageReader<MouseWheel>,
     window: Single<&Window>,
     mut camera_transform: Single<&mut Transform, With<Camera2d>>,
@@ -73,11 +71,19 @@ fn handle_zoom_input(
         cursor_screen.x - viewport_center.x,
         -(cursor_screen.y - viewport_center.y),
     );
-    let scale_transform = if is_within_center_zone(cursor_from_center) {
-        println!("cursor within center");
-        Vec2 { x: 0.0, y: 0.0 }
+
+    let camera_scale = camera_transform.scale.x;
+    let camera_pos = camera_transform.translation.xy();
+
+    let cursor_world = camera_pos + cursor_from_center * camera_scale;
+
+    let current_padding = ORIGIN_ZONE_PADDING * camera_scale;
+    let origin_zone_min = Vec2::ZERO - current_padding;
+    let origin_zone_max = Vec2::ZERO + current_padding;
+
+    let scale_transform = if is_within_zone(cursor_world, origin_zone_min, origin_zone_max) {
+        -camera_pos / camera_scale
     } else {
-        println!("cursor NOT within center");
         cursor_from_center
     };
 
@@ -94,6 +100,16 @@ fn handle_zoom_input(
         camera_transform.translation.x += scale_transform.x * scale_delta;
         camera_transform.translation.y += scale_transform.y * scale_delta;
         camera_transform.scale = Vec3::new(new_scale, new_scale, 1.0);
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let debug_box_size = ORIGIN_ZONE_PADDING * 2.0 * camera_scale;
+        gizmos.rect_2d(
+            Isometry2d::from_translation(Vec2::ZERO),
+            Vec2::splat(debug_box_size),
+            Color::linear_rgb(0.0, 1.0, 0.0), // Bright green for debugging
+        );
     }
 }
 
@@ -173,8 +189,8 @@ fn draw_infinite_grid(
     );
 }
 
-fn is_within_center_zone(point: Vec2) -> bool {
-    (point.cmpge(CENTER_CURSOR_ZONE_MIN) & point.cmple(CENTER_CURSOR_ZONE_MAX)).all()
+fn is_within_zone(point: Vec2, zone_min: Vec2, zone_max: Vec2) -> bool {
+    (point.cmpge(zone_min) & point.cmple(zone_max)).all()
 }
 
 fn to_world_units(pixels: f32, scale: f32) -> f32 {
